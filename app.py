@@ -1,39 +1,103 @@
 import streamlit as st
-import tensorflow as tf
+import cv2
 import numpy as np
-from tensorflow.keras.preprocessing import image
-import json
-from PIL import Image
+from tensorflow.keras.models import load_model
+import tempfile
+import time
+import os
 
-# Load model
-model = tf.keras.models.load_model("models/basic_cnn_best.keras")
+st.set_page_config(page_title="Real-Time Face Expression Recognition", layout="wide")
+st.title("Real-Time Face Expression Recognition")
 
-# Load class labels
-with open("classes.json", "r") as f:
-    class_labels = json.load(f)
+@st.cache_resource
+def load_emotion_model():
+    model_path = "models/emotion_recognition_model.keras"
+    return load_model(model_path)
 
-# Streamlit UI
-st.set_page_config(page_title="Facial Expression Recognition", page_icon="😊", layout="centered")
+model = load_emotion_model()
 
-st.title("Facial Expression Recognition")
-st.markdown("Upload an image and let the model predict your emotion!")
+class_labels = {
+    0: "angry",
+    1: "disgust",
+    2: "fear",
+    3: "happy",
+    4: "neutral",
+    5: "sad",
+    6: "surprise"
+}
 
-# Upload image
-uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
-if uploaded_file is not None:
-    img = Image.open(uploaded_file).convert("RGB")
-    st.image(img, caption="Uploaded Image", use_container_width=True)
+def predict_emotion(face_img):
+    gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (48, 48))
+    normalized = resized / 255.0
+    reshaped = np.expand_dims(normalized, axis=(0, -1))
+    preds = model.predict(reshaped, verbose=0)[0]
+    return class_labels[np.argmax(preds)], np.max(preds)
 
-    # Preprocess image
-    img = img.resize((224, 224))  # same size as your model input
-    img_array = image.img_to_array(img) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
+mode = st.radio("Choose Input Mode:", ["Live Camera", "Upload Image"], horizontal=True)
 
-    # Prediction
-    preds = model.predict(img_array)
-    pred_class = np.argmax(preds[0])
-    confidence = np.max(preds[0]) * 100
+FRAME_WINDOW = st.image(np.zeros((480, 640, 3), dtype=np.uint8))
 
-    st.subheader(f"Predicted Expression: **{class_labels[str(pred_class)]}**")
-    st.write(f"Confidence: {confidence:.2f}%")
+if mode == "Live Camera":
+    col1, col2 = st.columns(2)
+    start = col1.button("Start Camera")
+    stop = col2.button("Stop Camera")
+
+    if "run" not in st.session_state:
+        st.session_state.run = False
+
+    if start:
+        st.session_state.run = True
+    if stop:
+        st.session_state.run = False
+
+    camera = cv2.VideoCapture(0)
+
+    while st.session_state.run:
+        ret, frame = camera.read()
+        if not ret:
+            st.warning("Failed to access camera.")
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+        for (x, y, w, h) in faces:
+            face_img = frame[y:y+h, x:x+w]
+            label, confidence = predict_emotion(face_img)
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(frame, f"{label} ({confidence*100:.1f}%)", (x, y-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+        FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        time.sleep(0.05)
+
+    camera.release()
+    try:
+        cv2.destroyAllWindows()
+    except:
+        pass
+
+else:
+    uploaded_image = st.file_uploader("Upload an image file", type=["jpg", "jpeg", "png"])
+
+    if uploaded_image is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(uploaded_image.read())
+        img = cv2.imread(tfile.name)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+        for (x, y, w, h) in faces:
+            face_img = img[y:y+h, x:x+w]
+            label, confidence = predict_emotion(face_img)
+            cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(img, f"{label} ({confidence*100:.1f}%)", (x, y-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+        st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        os.remove(tfile.name)
+
